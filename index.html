@@ -83,6 +83,15 @@ body {
 .card.tight { padding: 12px 14px; }
 .card-title { font-size: 14px; font-weight: 600; margin: 0 0 2px; }
 .card-sub { font-size: 12px; color: var(--ink3); margin: 0 0 12px; line-height: 1.55; }
+/* 连接检查结果 */
+.sync-msgs { margin-top: 10px; }
+.sync-msgs .chk {
+  font-size: 12px; line-height: 1.6; padding: 6px 10px; border-radius: 9px;
+  margin-bottom: 5px; word-break: break-all;
+}
+.sync-msgs .chk.ok { background: #F1F6EE; color: #4A7A48; }
+.sync-msgs .chk.bad { background: #FBEFEC; color: #A84B36; }
+
 /* 同步状态 */
 .sync-state {
   display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px;
@@ -819,6 +828,7 @@ const APP_DATA = {
 <script>/* 小猴子成长记 · 应用逻辑 */
 
 const KEY = 'xiaohouzi.v1';
+const VER = '11-04 10:39';
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => Array.prototype.slice.call((r || document).querySelectorAll(s));
 
@@ -1754,7 +1764,7 @@ function openMenu() {
     '<input type="file" id="mFile" accept="application/json" style="display:none">' +
     '<button class="btn btn-ghost btn-block" id="mClear" style="color:var(--rose);font-size:13px">清空全部数据</button>' +
     '<div class="divider"></div>' +
-    '<div class="tip">共 ' + S.entries.length + ' 条记录 · ' + S.learn.length + ' 笔学习 · ' + S.miles.length + ' 个里程碑<br>小猴子成长记 · 数据格式 v1</div>';
+    '<div class="tip">共 ' + S.entries.length + ' 条记录 · ' + S.learn.length + ' 笔学习 · ' + S.miles.length + ' 个里程碑<br>小猴子成长记 · v' + VER + '</div>';
 
   $('#mask').classList.add('on');
 
@@ -1945,11 +1955,78 @@ function ghHeaders() {
   };
 }
 
+function cleanRepo(v) {
+  return String(v || '').trim()
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '')
+    .replace(/\s+/g, '');
+}
+
 async function ghWhoAmI() {
   const r = await fetch(GH + '/user', { headers: ghHeaders(), cache: 'no-store' });
   if (r.status === 401) throw new Error('令牌无效，检查是否复制完整');
   if (!r.ok) throw new Error('连不上 GitHub（' + r.status + '）');
   return (await r.json()).login;
+}
+
+/* 分步检查：令牌 → 仓库 → 权限。哪一步断了就停在哪一步。 */
+async function checkConn() {
+  const lines = [];
+  const push = function (ok, txt) { lines.push({ ok: ok, txt: txt }); };
+  try {
+    const r = await fetch(GH + '/user', { headers: ghHeaders(), cache: 'no-store' });
+    if (r.status === 401) {
+      push(false, '令牌无效：可能复制不完整，或已经过期');
+      return { ok: false, lines: lines };
+    }
+    if (!r.ok) {
+      push(false, '连不上 GitHub（' + r.status + '），先确认网络');
+      return { ok: false, lines: lines };
+    }
+    const me = (await r.json()).login;
+    push(true, '令牌有效，账号 ' + me);
+
+    if (!SY.repo || SY.repo.indexOf('/') < 0) {
+      push(false, '数据仓库没填对，应该是「用户名/仓库名」');
+      return { ok: false, lines: lines };
+    }
+    const owner = SY.repo.split('/')[0];
+    if (owner.toLowerCase() !== String(me).toLowerCase()) {
+      push(false, '仓库属于 ' + owner + '，但令牌是 ' + me + ' 的账号，对不上');
+      return { ok: false, lines: lines };
+    }
+
+    const rp = await fetch(GH + '/repos/' + SY.repo, { headers: ghHeaders(), cache: 'no-store' });
+    if (rp.status === 404) {
+      push(false, '找不到仓库 ' + SY.repo + '：要么名字写错，要么建令牌时没把这个仓库勾进去');
+      return { ok: false, lines: lines };
+    }
+    if (!rp.ok) {
+      push(false, '读不到仓库信息（' + rp.status + '）');
+      return { ok: false, lines: lines };
+    }
+    const j = await rp.json();
+    push(true, '仓库存在：' + j.full_name + (j.private ? '（私有）' : '（公开）'));
+    if (!j.permissions || !j.permissions.push) {
+      push(false, '令牌只有读权限：权限里要把 Contents 改成 Read and write');
+      return { ok: false, lines: lines };
+    }
+    push(true, '有写入权限');
+    return { ok: true, lines: lines };
+  } catch (e) {
+    push(false, '网络错误：' + (e.message || '连不上 GitHub'));
+    return { ok: false, lines: lines };
+  }
+}
+
+function renderCheck(lines) {
+  const el = $('#syMsg');
+  if (!el) return;
+  el.innerHTML = lines.map(function (l) {
+    return '<div class="chk ' + (l.ok ? 'ok' : 'bad') + '">' + (l.ok ? '✓' : '✕') + ' ' + esc(l.txt) + '</div>';
+  }).join('');
 }
 
 async function ghRead() {
@@ -1973,7 +2050,7 @@ async function ghWrite(text, sha) {
   if (r.status === 409 || r.status === 422) return false;   // 别人刚提交过，冲突
   if (r.status === 401) throw new Error('令牌无效或已过期');
   if (r.status === 403) throw new Error('令牌没有写入权限');
-  if (r.status === 404) throw new Error('仓库不存在，或令牌没选中这个仓库');
+  if (r.status === 404) throw new Error('写不进去：点「检查连接」看是仓库还是权限的问题');
   throw new Error('上传失败（' + r.status + '）');
 }
 
@@ -2017,7 +2094,11 @@ async function syncNow(silent) {
     if (!silent) toast(added ? '同步完成，收到 ' + added + ' 条新内容' : '同步完成，已是最新');
   } catch (e) {
     SY.err = e.message || '同步失败'; persistSync();
-    if (!silent) { toast(SY.err); if ($('#syStatus')) $('#syStatus').textContent = SY.err; }
+    if (!silent) {
+      toast(SY.err);
+      const el = $('#syMsg');
+      if (el) el.innerHTML += '<div class="chk bad">✕ ' + esc(SY.err) + '</div>';
+    }
   }
   syncBusy = false;
 }
@@ -2049,7 +2130,9 @@ function openSync() {
     '<div class="label">数据仓库（留空自动识别）</div>' +
     '<input type="text" id="syRepo" value="' + esc(SY.repo) + '" placeholder="你的用户名/xiaohouzi-data">' +
     '<button class="btn btn-primary btn-block" id="sySave" style="margin-top:14px">保存并同步</button>' +
-    '<div class="row" style="margin-top:9px"><button class="btn" id="syNow">立即同步</button><button class="btn" id="syBack">返回设置</button></div>' +
+    '<div class="row" style="margin-top:9px"><button class="btn" id="syCheck">检查连接</button><button class="btn" id="syNow">立即同步</button></div>' +
+    '<button class="btn btn-sm btn-block" id="syBack" style="margin-top:9px">返回设置</button>' +
+    '<div id="syMsg" class="sync-msgs"></div>' +
     '<div class="divider"></div>' +
     '<div class="label">把配置发给爸爸（一次性）</div>' +
     '<div class="row"><button class="btn btn-sm" id="syCopyCfg">复制配置</button><button class="btn btn-sm" id="syPasteCfg">粘贴爸爸的配置</button></div>' +
@@ -2063,7 +2146,7 @@ function openSync() {
   $('#sySave').onclick = async function () {
     SY.token = $('#syTok').value.trim();
     SY.pass = $('#syPass').value;
-    SY.repo = $('#syRepo').value.trim();
+    SY.repo = cleanRepo($('#syRepo').value);
     if (!SY.token || !SY.pass) { toast('令牌和口令都要填'); return; }
     if (SY.pass.length < 6) { toast('口令太短，至少 6 位'); return; }
     persistSync();
@@ -2078,11 +2161,38 @@ function openSync() {
       try { SY.repo = (await ghWhoAmI()) + '/' + SY.repo; persistSync(); }
       catch (e) { toast(e.message); return; }
     }
+    $('#syRepo').value = SY.repo;
+    const chk = await checkConn();
+    renderCheck(chk.lines);
+    if (!chk.ok) {
+      const bad = chk.lines.filter(function (l) { return !l.ok; })[0];
+      SY.err = bad ? bad.txt : '连接检查没通过';
+      persistSync();
+      toast('还没通，看下面的 ✕ 那一行');
+      return;
+    }
     await syncNow(false);
-    if (!SY.err) setTimeout(openSync, 700);
-    else if ($('#syStatus')) $('#syStatus').textContent = SY.err;
+    if (!SY.err) {
+      renderCheck(chk.lines.concat([{ ok: true, txt: '同步完成 ' + fmtTime(Date.now()) }]));
+      toast('同步成功');
+    } else {
+      renderCheck(chk.lines.concat([{ ok: false, txt: SY.err }]));
+    }
   };
-  $('#syNow').onclick = function () { syncNow(false); };
+  $('#syCheck').onclick = async function () {
+    SY.token = $('#syTok').value.trim();
+    SY.repo = cleanRepo($('#syRepo').value);
+    if (!SY.token) { toast('先把令牌填上'); return; }
+    persistSync();
+    if (!SY.repo) {
+      try { SY.repo = (await ghWhoAmI()) + '/xiaohouzi-data'; persistSync(); }
+      catch (e) { toast(e.message); return; }
+    }
+    $('#syRepo').value = SY.repo;
+    const chk = await checkConn();
+    renderCheck(chk.lines);
+    if (!$('#syMsg')) toast('检查完了');
+  };
   $('#syCopyCfg').onclick = function () {
     const t = $('#syTok').value.trim(), p = $('#syPass').value, r = $('#syRepo').value.trim();
     if (!t || !p) { toast('先把令牌和口令填上'); return; }
